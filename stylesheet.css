@@ -1,0 +1,42 @@
+/*
+ * openSUSE Updates Indicator – stylesheet.css
+ */
+
+/* ── Update list container ────────────────────────────────────────────────── */
+.opensuse-updates-list {
+    padding: 4px 0;
+}
+
+/* ── Individual update entry ─────────────────────────────────────────────── */
+.opensuse-update-line {
+    padding: 2px 12px;
+    spacing: 6px;
+}
+
+/* Package name */
+.opensuse-update-name {
+    font-weight: bold;
+}
+
+/* Old version (greyed out) */
+.opensuse-update-ver-from {
+    color: alpha(white, 0.5);
+    font-size: 0.9em;
+}
+
+/* New version (accent green – matches openSUSE brand colour) */
+.opensuse-update-ver-to {
+    color: #73ba25;
+    font-size: 0.9em;
+}
+
+/* Security update badge */
+.opensuse-update-security {
+    /* The lock emoji carries its own colour; no extra style needed */
+}
+
+/* ── Cancel button inside "Checking…" menu item ───────────────────────────── */
+.opensuse-updates-cancel-btn {
+    padding: 2px;
+    border-radius: 4px;
+}

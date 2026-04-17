@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist gettext-domain="opensuse-updates-indicator">
+  <schema id="org.gnome.shell.extensions.opensuse-updates-indicator"
+          path="/org/gnome/shell/extensions/opensuse-updates-indicator/">
+
+    <!-- Behaviour -->
+    <key type="b" name="always-visible">
+      <default>true</default>
+      <summary>Indicator is always visible</summary>
+      <description>If true, the indicator is always visible even when no updates are pending.</description>
+    </key>
+    <key type="b" name="show-count">
+      <default>true</default>
+      <summary>Show update count on indicator</summary>
+      <description>Display the number of pending updates next to the icon.</description>
+    </key>
+    <key type="b" name="show-timechecked">
+      <default>true</default>
+      <summary>Show last checked time in menu</summary>
+      <description>Display the date and time of the last update check in the menu.</description>
+    </key>
+    <key type="b" name="notify">
+      <default>false</default>
+      <summary>Send notification when new updates are available</summary>
+      <description>Show a GNOME notification when new updates are detected.</description>
+    </key>
+
+    <!-- Timing -->
+    <key type="i" name="boot-wait">
+      <default>15</default>
+      <summary>Seconds to wait before first check at startup</summary>
+      <description>Delay (in seconds) before the first automatic update check after login.</description>
+      <range min="0" max="300"/>
+    </key>
+    <key type="i" name="check-interval">
+      <default>60</default>
+      <summary>Interval between update checks (minutes)</summary>
+      <description>How often to check for updates automatically, in minutes. Set to 0 to disable.</description>
+      <range min="0" max="10080"/>
+    </key>
+
+    <!-- Commands -->
+    <key type="s" name="check-cmd">
+      <default>'/usr/bin/zypper --quiet --no-color --no-refresh list-updates'</default>
+      <summary>Command used to check for available updates</summary>
+      <description>Shell command to list available updates. Must output one update per line in zypper format.</description>
+    </key>
+    <key type="i" name="update-cmd-options">
+      <default>2</default>
+      <summary>How to apply updates</summary>
+      <description>0=GNOME Software, 1=GNOME PackageKit, 2=Terminal: zypper dup, 3=Terminal: zypper ref+dup, 4=Terminal: zypper dup + flatpak update, 5=Terminal: zypper ref+dup + flatpak update, 6=Terminal: flatpak update only, 7=Custom command</description>
+      <range min="0" max="7"/>
+    </key>
+    <key type="s" name="update-cmd">
+      <default>''</default>
+      <summary>Custom update command</summary>
+      <description>Command to run when "Custom" is selected as the update method.</description>
+    </key>
+    <key type="s" name="terminal">
+      <default>'gnome-terminal -- bash -c'</default>
+      <summary>Terminal emulator and launch options</summary>
+      <description>Terminal command used to run zypper. The update command is appended as a quoted argument.</description>
+    </key>
+
+    <!-- Flatpak -->
+    <key type="b" name="check-flatpak">
+      <default>false</default>
+      <summary>Also check for Flatpak updates</summary>
+      <description>Run a separate flatpak check and include Flatpak apps in the update count and list.</description>
+    </key>
+    <key type="s" name="check-flatpak-cmd">
+      <default>'flatpak remote-ls --updates --columns=application'</default>
+      <summary>Command used to list available Flatpak updates</summary>
+      <description>Must output one application ID per line.</description>
+    </key>
+
+    <!-- Display -->
+    <key type="b" name="strip-versions">
+      <default>false</default>
+      <summary>Show only package names in the update list</summary>
+      <description>If true, version numbers are hidden in the pending update list.</description>
+    </key>
+    <key type="i" name="auto-expand-list">
+      <default>0</default>
+      <summary>Auto-expand update list when count is at most this value</summary>
+      <description>Automatically expand the update list submenu if the number of updates is ≤ this value. 0 = never auto-expand.</description>
+      <range min="0" max="100"/>
+    </key>
+
+    <!-- Monitoring -->
+    <key type="s" name="zypper-dir">
+      <default>'/var/lib/zypp'</default>
+      <summary>Directory to monitor for package database changes</summary>
+      <description>When this directory changes (e.g. after applying updates), a new check is scheduled automatically.</description>
+    </key>
+
+    <!-- Panel positioning -->
+    <key type="b" name="enable-positioning">
+      <default>false</default>
+      <summary>Enable manual panel position</summary>
+      <description>If true, the indicator will be placed at a specific position in the panel.</description>
+    </key>
+    <key type="i" name="position">
+      <default>2</default>
+      <summary>Panel box (0=left, 1=center, 2=right)</summary>
+      <range min="0" max="2"/>
+    </key>
+    <key type="i" name="position-number">
+      <default>0</default>
+      <summary>Index within the chosen panel box</summary>
+      <range min="0" max="99"/>
+    </key>
+
+  </schema>
+</schemalist>

@@ -1,0 +1,10 @@
+{
+  "name": "openSUSE Updates Indicator",
+  "description": "Update indicator for openSUSE Tumbleweed and Slowroll. Shows pending updates in the panel and lets you choose how to apply them: via GNOME Software, GNOME PackageKit, or a terminal running zypper.",
+  "uuid": "opensuse-updates-indicator@local",
+  "settings-schema": "org.gnome.shell.extensions.opensuse-updates-indicator",
+  "gettext-domain": "opensuse-updates-indicator",
+  "shell-version": ["46", "47", "48", "49"],
+  "version": 1,
+  "version-name": "1.0.0"
+}
