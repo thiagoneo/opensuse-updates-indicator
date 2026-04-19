@@ -57,9 +57,14 @@
       <description>Command to run when "Custom" is selected as the update method.</description>
     </key>
     <key type="s" name="terminal">
-      <default>'gnome-terminal -- bash -c'</default>
-      <summary>Terminal emulator and launch options</summary>
-      <description>Terminal command used to run zypper. The update command is appended as a quoted argument.</description>
+      <default>'gnome-terminal --'</default>
+      <summary>Terminal emulator open command</summary>
+      <description>Command to open the terminal window. The extension always appends "bash -c SCRIPT" after this. Examples: "gnome-terminal --", "tilix -e", "xterm -e", "konsole -e", "alacritty -e".</description>
+    </key>
+    <key type="b" name="pause-before-close">
+      <default>true</default>
+      <summary>Wait for Enter before closing the terminal</summary>
+      <description>If true, the terminal window stays open after the update finishes and waits for the user to press Enter.</description>
     </key>
 
     <!-- Flatpak -->
@@ -69,7 +74,7 @@
       <description>Run a separate flatpak check and include Flatpak apps in the update count and list.</description>
     </key>
     <key type="s" name="check-flatpak-cmd">
-      <default>'flatpak remote-ls --updates --columns=application'</default>
+      <default>'flatpak remote-ls --updates --columns=application 2&gt;/dev/null'</default>
       <summary>Command used to list available Flatpak updates</summary>
       <description>Must output one application ID per line.</description>
     </key>
@@ -83,7 +88,7 @@
     <key type="i" name="auto-expand-list">
       <default>0</default>
       <summary>Auto-expand update list when count is at most this value</summary>
-      <description>Automatically expand the update list submenu if the number of updates is ≤ this value. 0 = never auto-expand.</description>
+      <description>Automatically expand the update list submenu if the number of updates is less than or equal to this value. 0 = never auto-expand.</description>
       <range min="0" max="100"/>
     </key>
 
@@ -109,6 +114,19 @@
       <default>0</default>
       <summary>Index within the chosen panel box</summary>
       <range min="0" max="99"/>
+    </key>
+
+
+    <!-- Privilege escalation -->
+    <key type="s" name="priv-escalation">
+      <default>'sudo'</default>
+      <summary>Privilege escalation method for zypper and system Flatpak updates</summary>
+      <description>Command used to gain root for zypper and system Flatpak. "sudo" asks in the terminal; "pkexec" shows a graphical dialog; "run0" uses systemd/polkit (graphical on most setups).</description>
+    </key>
+    <key type="b" name="flatpak-user-only">
+      <default>false</default>
+      <summary>Update only user-installed Flatpaks (no root needed)</summary>
+      <description>If true, passes --user to flatpak update, which never requires elevated privileges. Disable to also update system Flatpaks (requires the configured privilege escalation method).</description>
     </key>
 
   </schema>

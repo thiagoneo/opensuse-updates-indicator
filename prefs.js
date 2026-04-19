@@ -5,12 +5,11 @@
 
 import Adw    from 'gi://Adw';
 import Gtk    from 'gi://Gtk';
-import GObject from 'gi://GObject';
 
 import {ExtensionPreferences, gettext as _}
     from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
-// Labels for the update-cmd-options integer setting (index = option number)
+// Labels for update-cmd-options (index = option number)
 const UPDATE_CMD_LABELS = [
     /* 0 */ 'GNOME Software (GUI)',
     /* 1 */ 'GNOME PackageKit (GUI)',
@@ -26,13 +25,12 @@ export default class OpenSUSEUpdatesPreferences extends ExtensionPreferences {
 
     fillPreferencesWindow(window) {
         const settings = this.getSettings();
-        window.set_default_size(700, 640);
+        window.set_default_size(700, 660);
         window.set_search_enabled(false);
 
         // ── Page 1: Basic ────────────────────────────────────────────────────
         const basicPage = new Adw.PreferencesPage({
-            title:     _('Basic'),
-            icon_name: 'preferences-system-symbolic',
+            title: _('Basic'), icon_name: 'preferences-system-symbolic',
         });
         window.add(basicPage);
 
@@ -44,7 +42,7 @@ export default class OpenSUSEUpdatesPreferences extends ExtensionPreferences {
             _('Keep the icon visible even when the system is up to date')));
         visGroup.add(_switchRow(settings, 'show-count',
             _('Show update count'),
-            _('Display the number of pending updates next to the icon (zypper + Flatpak combined)')));
+            _('Display the total number of pending updates (zypper + Flatpak) next to the icon')));
         visGroup.add(_switchRow(settings, 'show-timechecked',
             _('Show last check time'),
             _('Display when the last check ran in the indicator menu')));
@@ -66,14 +64,14 @@ export default class OpenSUSEUpdatesPreferences extends ExtensionPreferences {
         basicPage.add(notifGroup);
         notifGroup.add(_switchRow(settings, 'notify',
             _('Notify when new updates are found'),
-            _('Show a GNOME notification when the update check finds new packages')));
+            _('Show a GNOME notification when the check finds new packages')));
 
-        // Update list
+        // Update list display
         const listGroup = new Adw.PreferencesGroup({ title: _('Update list') });
         basicPage.add(listGroup);
         listGroup.add(_switchRow(settings, 'strip-versions',
             _('Hide version numbers'),
-            _('Show only package names (no old→new versions) in the zypper update list')));
+            _('Show only package names (without old→new versions) in the zypper update list')));
         listGroup.add(_spinRow(settings, 'auto-expand-list',
             _('Auto-expand list when ≤ N updates'),
             _('Automatically open the update lists if the total count is at most this many. 0 = never.'),
@@ -81,15 +79,14 @@ export default class OpenSUSEUpdatesPreferences extends ExtensionPreferences {
 
         // ── Page 2: Commands ─────────────────────────────────────────────────
         const cmdPage = new Adw.PreferencesPage({
-            title:     _('Commands'),
-            icon_name: 'utilities-terminal-symbolic',
+            title: _('Commands'), icon_name: 'utilities-terminal-symbolic',
         });
         window.add(cmdPage);
 
-        // Check command (zypper)
+        // zypper check
         const checkGroup = new Adw.PreferencesGroup({
             title:       _('zypper check command'),
-            description: _('Runs to list available zypper updates. No root needed; reads the local cache.'),
+            description: _('Runs to list available zypper updates. No root needed; reads the local cache only.'),
         });
         cmdPage.add(checkGroup);
         checkGroup.add(_entryRow(settings, 'check-cmd',
@@ -99,7 +96,7 @@ export default class OpenSUSEUpdatesPreferences extends ExtensionPreferences {
         // Flatpak check
         const flatpakGroup = new Adw.PreferencesGroup({
             title:       _('Flatpak'),
-            description: _('When enabled, Flatpak updates are listed separately in the menu and included in the total count.'),
+            description: _('When enabled, Flatpak updates are listed separately in the menu and included in the total count. The command is run via bash, so pipes and redirections work.'),
         });
         cmdPage.add(flatpakGroup);
         flatpakGroup.add(_switchRow(settings, 'check-flatpak',
@@ -107,7 +104,10 @@ export default class OpenSUSEUpdatesPreferences extends ExtensionPreferences {
             _('Run a separate flatpak check after each zypper check')));
         flatpakGroup.add(_entryRow(settings, 'check-flatpak-cmd',
             _('Flatpak check command'),
-            'flatpak remote-ls --updates --columns=application'));
+            'flatpak remote-ls --updates --columns=application 2>/dev/null'));
+        flatpakGroup.add(_switchRow(settings, 'flatpak-user-only',
+            _('User installs only (no root needed)'),
+            _('Pass --user to flatpak update. Use this if you only have user-installed Flatpaks or want to avoid the password prompt for system ones.')));
 
         // Update command
         const updateGroup = new Adw.PreferencesGroup({
@@ -132,28 +132,61 @@ export default class OpenSUSEUpdatesPreferences extends ExtensionPreferences {
 
         const customRow = _entryRow(settings, 'update-cmd',
             _('Custom command'),
-            _('Full command to run, e.g.: gnome-terminal -- bash -c \'sudo zypper dup\''));
+            _('Full command, e.g.: sudo zypper dup'));
         updateGroup.add(customRow);
-
-        const syncCustomRow = () => {
-            customRow.visible = (comboRow.get_selected() === 7);
-        };
+        const syncCustomRow = () => { customRow.visible = (comboRow.get_selected() === 7); };
         syncCustomRow();
 
-        updateGroup.add(_entryRow(settings, 'terminal',
-            _('Terminal emulator command'),
-            _('Used for terminal-based update options, e.g.: gnome-terminal -- bash -c')));
+        // Privilege escalation
+        const privGroup = new Adw.PreferencesGroup({
+            title:       _('Privilege escalation'),
+            description: _('Method used to gain root for zypper and system Flatpak updates.'),
+        });
+        cmdPage.add(privGroup);
+
+        const PRIV_OPTS = [
+            { id: 'sudo',   label: 'sudo  (password in terminal)' },
+            { id: 'pkexec', label: 'pkexec  (graphical dialog — recommended)' },
+            { id: 'run0',   label: 'run0  (systemd/polkit)' },
+        ];
+        const privCombo = new Adw.ComboRow({
+            title:    _('Escalation method'),
+            subtitle: _('Used in front of zypper and flatpak update --system'),
+        });
+        const privModel = new Gtk.StringList();
+        PRIV_OPTS.forEach(o => privModel.append(o.label));
+        privCombo.set_model(privModel);
+        const currentPriv = settings.get_string('priv-escalation');
+        privCombo.set_selected(PRIV_OPTS.findIndex(o => o.id === currentPriv) || 0);
+        privCombo.connect('notify::selected', () => {
+            settings.set_string('priv-escalation', PRIV_OPTS[privCombo.get_selected()].id);
+        });
+        privGroup.add(privCombo);
+
+        // Terminal settings
+        const termGroup = new Adw.PreferencesGroup({
+            title:       _('Terminal'),
+            description: _('Used for all terminal-based update options. The extension always appends "bash -c \'SCRIPT\'" after your command, so you only need to provide the window-open part.'),
+        });
+        cmdPage.add(termGroup);
+
+        termGroup.add(_entryRow(settings, 'terminal',
+            _('Terminal command'),
+            _('Examples: "gnome-terminal --"  "tilix -e"  "xterm -e"  "konsole -e"  "alacritty -e"')));
+
+        termGroup.add(_switchRow(settings, 'pause-before-close',
+            _('Wait for Enter before closing'),
+            _('After the update finishes, print a message and keep the terminal open until you press Enter')));
 
         // ── Page 3: Advanced ─────────────────────────────────────────────────
         const advPage = new Adw.PreferencesPage({
-            title:     _('Advanced'),
-            icon_name: 'preferences-other-symbolic',
+            title: _('Advanced'), icon_name: 'preferences-other-symbolic',
         });
         window.add(advPage);
 
         const monGroup = new Adw.PreferencesGroup({
             title:       _('Directory monitor'),
-            description: _('The extension watches this directory for changes (e.g. after applying updates) and schedules a new check automatically. Default: /var/lib/zypp'),
+            description: _('The extension watches this directory for changes (e.g. after zypper transactions) and schedules a new check automatically.'),
         });
         advPage.add(monGroup);
         monGroup.add(_entryRow(settings, 'zypper-dir', _('Monitored directory'), '/var/lib/zypp'));
@@ -189,8 +222,7 @@ function _switchRow(settings, key, title, subtitle = '') {
 
 function _spinRow(settings, key, title, subtitle = '', min, max, step) {
     const row = new Adw.SpinRow({
-        title,
-        subtitle,
+        title, subtitle,
         adjustment: new Gtk.Adjustment({ lower: min, upper: max, step_increment: step }),
     });
     settings.bind(key, row, 'value', 0);

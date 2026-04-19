@@ -25,16 +25,17 @@ import {Extension, gettext as _, ngettext as __}
     from 'resource:///org/gnome/shell/extensions/extension.js';
 
 // ---------------------------------------------------------------------------
-// zypper --quiet list-updates output (one update per line):
+// zypper --quiet list-updates output:
 //   "v | repo | package | old-ver | new-ver | arch"   (regular update)
 //   "s | ..."                                          (security update)
-// Header lines start with capital "S"; separator lines start with "-".
-// We match only lines that begin with a lowercase letter or "!" status.
+// Header lines start with a capital letter; separator lines start with "-".
+// We only match lines that begin with a lowercase letter or "!".
 // ---------------------------------------------------------------------------
 const RE_ZypperLine  = /^\s*[a-z!]\s*\|/;
 
-// flatpak remote-ls --updates --columns=application outputs one app-id per line.
-const RE_FlatpakLine = /\S/;
+// Flatpak app IDs always contain at least one dot (e.g. org.gnome.Calculator).
+// This excludes header lines like "Application" emitted by some flatpak versions.
+const RE_FlatpakLine = /^[a-zA-Z][a-zA-Z0-9_-]*(\.[a-zA-Z][a-zA-Z0-9_-]*)+/;
 
 function parseZypperLine(line) {
     const p = line.split('|').map(s => s.trim());
@@ -45,12 +46,12 @@ function parseZypperLine(line) {
 // ---------------------------------------------------------------------------
 // State that survives extension disable/enable cycles (screen lock etc.)
 // ---------------------------------------------------------------------------
-let FIRST_BOOT       = 1;
-let UPDATES_PENDING  = -1;  // -1 unknown, -2 error, -3 checking, >=0 count
-let UPDATES_LIST     = [];
-let FLATPAK_PENDING  = 0;   // flatpak update count (0 when disabled/unknown)
-let FLATPAK_LIST     = [];
-let LAST_CHECK       = undefined;
+let FIRST_BOOT      = 1;
+let UPDATES_PENDING = -1;  // -1 unknown, -2 error, -3 checking, >=0 count
+let UPDATES_LIST    = [];
+let FLATPAK_PENDING = 0;
+let FLATPAK_LIST    = [];
+let LAST_CHECK      = undefined;
 
 // Settings mirrors
 let ALWAYS_VISIBLE    = true;
@@ -61,13 +62,16 @@ let BOOT_WAIT         = 15;
 let CHECK_INTERVAL    = 3600;
 let CHECK_CMD         = '/usr/bin/zypper --quiet --no-color --no-refresh list-updates';
 let CHECK_FLATPAK     = false;
-let CHECK_FLATPAK_CMD = 'flatpak remote-ls --updates --columns=application';
+let CHECK_FLATPAK_CMD = 'flatpak remote-ls --updates --columns=application 2>/dev/null';
 let UPDATE_CMD_OPT    = 2;
 let UPDATE_CMD        = '';
-let TERMINAL_CMD      = 'gnome-terminal -- bash -c';
+let TERMINAL_CMD      = 'gnome-terminal --';
+let PAUSE_BEFORE_CLOSE = true;
 let STRIP_VERSIONS    = false;
 let AUTO_EXPAND_LIST  = 0;
 let ZYPPER_DIR        = '/var/lib/zypp';
+let PRIV_ESC          = 'sudo';          // sudo | pkexec | run0
+let FLATPAK_USER_ONLY = false;
 
 // ---------------------------------------------------------------------------
 // Extension entry point
@@ -228,27 +232,30 @@ class OpenSUSEUpdateIndicator extends Button {
 
     // ── Settings ──────────────────────────────────────────────────────────────
     _applySettings() {
-        ALWAYS_VISIBLE    = this._settings.get_boolean('always-visible');
-        SHOW_COUNT        = this._settings.get_boolean('show-count');
-        SHOW_TIMECHECKED  = this._settings.get_boolean('show-timechecked');
-        NOTIFY            = this._settings.get_boolean('notify');
-        BOOT_WAIT         = this._settings.get_int('boot-wait');
-        CHECK_INTERVAL    = 60 * this._settings.get_int('check-interval');
-        CHECK_CMD         = this._settings.get_string('check-cmd');
-        CHECK_FLATPAK     = this._settings.get_boolean('check-flatpak');
-        CHECK_FLATPAK_CMD = this._settings.get_string('check-flatpak-cmd');
-        UPDATE_CMD_OPT    = this._settings.get_int('update-cmd-options');
-        UPDATE_CMD        = this._settings.get_string('update-cmd');
-        TERMINAL_CMD      = this._settings.get_string('terminal');
-        STRIP_VERSIONS    = this._settings.get_boolean('strip-versions');
-        AUTO_EXPAND_LIST  = this._settings.get_int('auto-expand-list');
-        ZYPPER_DIR        = this._settings.get_string('zypper-dir');
+        ALWAYS_VISIBLE     = this._settings.get_boolean('always-visible');
+        SHOW_COUNT         = this._settings.get_boolean('show-count');
+        SHOW_TIMECHECKED   = this._settings.get_boolean('show-timechecked');
+        NOTIFY             = this._settings.get_boolean('notify');
+        BOOT_WAIT          = this._settings.get_int('boot-wait');
+        CHECK_INTERVAL     = 60 * this._settings.get_int('check-interval');
+        CHECK_CMD          = this._settings.get_string('check-cmd');
+        CHECK_FLATPAK      = this._settings.get_boolean('check-flatpak');
+        CHECK_FLATPAK_CMD  = this._settings.get_string('check-flatpak-cmd');
+        UPDATE_CMD_OPT     = this._settings.get_int('update-cmd-options');
+        UPDATE_CMD         = this._settings.get_string('update-cmd');
+        TERMINAL_CMD       = this._settings.get_string('terminal');
+        PAUSE_BEFORE_CLOSE = this._settings.get_boolean('pause-before-close');
+        STRIP_VERSIONS     = this._settings.get_boolean('strip-versions');
+        AUTO_EXPAND_LIST   = this._settings.get_int('auto-expand-list');
+        ZYPPER_DIR         = this._settings.get_string('zypper-dir');
+        PRIV_ESC           = this._settings.get_string('priv-escalation');
+        FLATPAK_USER_ONLY  = this._settings.get_boolean('flatpak-user-only');
 
         this.timeCheckedMenu.visible = SHOW_TIMECHECKED;
 
         if (!CHECK_FLATPAK) {
-            FLATPAK_PENDING = 0;
-            FLATPAK_LIST    = [];
+            FLATPAK_PENDING   = 0;
+            FLATPAK_LIST      = [];
             this._flatpakList = [];
             this.flatpakExpander.visible = false;
         }
@@ -260,19 +267,64 @@ class OpenSUSEUpdateIndicator extends Button {
         this._positionChanged();
     }
 
-    // ── Build the update command for the chosen option ────────────────────────
-    _getUpdateCommand() {
-        const T = snippet =>
-            `${TERMINAL_CMD} '${snippet}; echo; echo "--- Press Enter to close ---"; read _'`;
+    // ── Build the terminal update command ─────────────────────────────────────
+    //
+    // The fundamental rule: TERMINAL_CMD is only the "open a window" part,
+    // e.g. "gnome-terminal --" or "tilix -e" or "xterm -e".
+    // We ALWAYS inject "bash -c 'SCRIPT'" ourselves so that &&, ;, quotes,
+    // and any other shell syntax work correctly regardless of the terminal.
+    //
+    // The final argv passed to spawnCommandLine looks like:
+    //   gnome-terminal -- bash -c 'sudo zypper dup; ...'
+    //   tilix -e bash -c 'sudo zypper dup; ...'
+    //
+    // ── Privilege escalation helper ──────────────────────────────────────────
+    //
+    // Returns the privilege escalation prefix to use in front of zypper/flatpak.
+    //
+    // sudo   → asks for password in the terminal
+    // pkexec → pops a graphical polkit dialog (no terminal password prompt)
+    // run0   → systemd polkit wrapper, typically graphical on desktop sessions
+    //
+    _priv() { return PRIV_ESC; }   // 'sudo' | 'pkexec' | 'run0'
 
+    // Build the flatpak update command that respects FLATPAK_USER_ONLY.
+    // User flatpaks never need root; system flatpaks do.
+    _flatpakCmd() {
+        if (FLATPAK_USER_ONLY) {
+            // No privilege escalation needed for --user
+            return 'flatpak update --user -y';
+        } else {
+            // Update user installs first (no root), then system installs with priv
+            return `flatpak update --user -y; ${this._priv()} flatpak update --system -y`;
+        }
+    }
+
+    _buildScript(commands) {
+        let script = commands.join(' && ');
+        if (PAUSE_BEFORE_CLOSE)
+            script += '; echo; echo "--- Pressione Enter para fechar / Press Enter to close ---"; read -r _';
+        return script;
+    }
+
+    _inTerminal(commands) {
+        // Escape any single quotes that might appear in commands
+        const script = this._buildScript(commands).replace(/'/g, "\'");
+        // Always inject bash -c explicitly so &&, ;, pipes etc. work regardless
+        // of whether the terminal is gnome-terminal, tilix, xterm, konsole, etc.
+        return `${TERMINAL_CMD} bash -c '${script}'`;
+    }
+
+    _getUpdateCommand() {
+        const P = this._priv();
         switch (UPDATE_CMD_OPT) {
             case 0: return '/usr/bin/gnome-software --mode updates';
             case 1: return '/usr/bin/gpk-update-viewer';
-            case 2: return T('sudo zypper dup');
-            case 3: return T('sudo zypper ref && sudo zypper dup');
-            case 4: return T('sudo zypper dup && flatpak update -y');
-            case 5: return T('sudo zypper ref && sudo zypper dup && flatpak update -y');
-            case 6: return T('flatpak update -y');
+            case 2: return this._inTerminal([`${P} zypper dup`]);
+            case 3: return this._inTerminal([`${P} zypper ref`, `${P} zypper dup`]);
+            case 4: return this._inTerminal([`${P} zypper dup`, this._flatpakCmd()]);
+            case 5: return this._inTerminal([`${P} zypper ref`, `${P} zypper dup`, this._flatpakCmd()]);
+            case 6: return this._inTerminal([this._flatpakCmd()]);
             case 7: return UPDATE_CMD || '/usr/bin/gnome-software --mode updates';
             default: return '/usr/bin/gnome-software --mode updates';
         }
@@ -305,7 +357,7 @@ class OpenSUSEUpdateIndicator extends Button {
     _startDirectoryMonitor() {
         if (this._monitorPath && this._monitorPath !== ZYPPER_DIR) {
             this._monitor.cancel();
-            this._monitor = null;
+            this._monitor    = null;
             this._monitorPath = null;
         }
         if (ZYPPER_DIR && !this._monitorPath) {
@@ -342,9 +394,7 @@ class OpenSUSEUpdateIndicator extends Button {
             this.label.set_text(total.toString());
     }
 
-    _onMenuOpened() {
-        this._maybeAutoExpand();
-    }
+    _onMenuOpened() { this._maybeAutoExpand(); }
 
     _maybeAutoExpand() {
         const total = Math.max(0, UPDATES_PENDING) + FLATPAK_PENDING;
@@ -357,7 +407,7 @@ class OpenSUSEUpdateIndicator extends Button {
         }
     }
 
-    // ── Status display ────────────────────────────────────────────────────────
+    // ── Checking indicator ────────────────────────────────────────────────────
     _showChecking(active) {
         if (active) {
             this.updateIcon.set_gicon(this._getIcon('opensuse-unknown-symbolic'));
@@ -376,6 +426,7 @@ class OpenSUSEUpdateIndicator extends Button {
         this.timeCheckedMenu.visible = SHOW_TIMECHECKED;
     }
 
+    // ── Master status update (called after both async checks complete) ─────────
     _updateStatus(zypperCount) {
         const nZ    = typeof zypperCount === 'number' ? zypperCount : UPDATES_PENDING;
         const nF    = FLATPAK_PENDING;
@@ -400,6 +451,7 @@ class OpenSUSEUpdateIndicator extends Button {
                 this.updateIcon.set_gicon(this._getIcon('opensuse-uptodate-symbolic'));
                 this._updateZypperExpander(false, _('System is up to date :)'));
             } else {
+                // Only flatpak updates remain
                 this.updateIcon.set_gicon(this._getIcon('opensuse-updates-symbolic'));
                 this._updateZypperExpander(false, _('zypper: up to date'));
             }
@@ -441,8 +493,7 @@ class OpenSUSEUpdateIndicator extends Button {
     _updateZypperExpander(enabled, label) {
         if (!label) {
             this.menuExpander.visible = false;
-            this.updateNowMenuItem.reactive = false;
-            this.updateNowMenuItem.add_style_class_name('popup-inactive-menu-item');
+            this._setUpdateNowActive(false);
             return;
         }
 
@@ -480,11 +531,7 @@ class OpenSUSEUpdateIndicator extends Button {
             });
         }
 
-        this.updateNowMenuItem.reactive = enabled || FLATPAK_PENDING > 0;
-        if (this.updateNowMenuItem.reactive)
-            this.updateNowMenuItem.remove_style_class_name('popup-inactive-menu-item');
-        else
-            this.updateNowMenuItem.add_style_class_name('popup-inactive-menu-item');
+        this._setUpdateNowActive(enabled || FLATPAK_PENDING > 0);
     }
 
     // ── Flatpak update list submenu ───────────────────────────────────────────
@@ -505,13 +552,19 @@ class OpenSUSEUpdateIndicator extends Button {
                 if (!appId.trim()) return;
                 const row = new St.BoxLayout({ vertical: false, style_class: 'opensuse-update-line' });
                 row.add_child(new St.Label({ text: '📦 ', style_class: 'opensuse-update-flatpak-icon' }));
-                row.add_child(new St.Label({ text: appId.trim(), x_expand: true, style_class: 'opensuse-update-name' }));
+                row.add_child(new St.Label({
+                    text: appId.trim(), x_expand: true, style_class: 'opensuse-update-name',
+                }));
                 this.flatpakExpanderContainer.add_child(row);
             });
         }
 
-        this.updateNowMenuItem.reactive = enabled || UPDATES_PENDING > 0;
-        if (this.updateNowMenuItem.reactive)
+        this._setUpdateNowActive(enabled || UPDATES_PENDING > 0);
+    }
+
+    _setUpdateNowActive(active) {
+        this.updateNowMenuItem.reactive = active;
+        if (active)
             this.updateNowMenuItem.remove_style_class_name('popup-inactive-menu-item');
         else
             this.updateNowMenuItem.add_style_class_name('popup-inactive-menu-item');
@@ -526,8 +579,8 @@ class OpenSUSEUpdateIndicator extends Button {
         UPDATES_PENDING = -3;
 
         try {
-            const [ok, argv] = GLib.shell_parse_argv(CHECK_CMD);
-            if (!ok) throw new Error('Could not parse check command');
+            // Always run through bash so the user can use pipes, &&, 2>/dev/null etc. in check-cmd
+            const argv = ['/bin/bash', '-c', CHECK_CMD];
 
             const [, pid, , out_fd] =
                 GLib.spawn_async_with_pipes(null, argv, null, GLib.SpawnFlags.DO_NOT_REAP_CHILD, null);
@@ -566,7 +619,10 @@ class OpenSUSEUpdateIndicator extends Button {
     _checkUpdatesRead() {
         const list = [];
         let line;
-        do { [line] = this._updateProcess_stream.read_line_utf8(null); if (line) list.push(line); } while (line);
+        do {
+            [line] = this._updateProcess_stream.read_line_utf8(null);
+            if (line) list.push(line);
+        } while (line);
         this._updateList = list;
         this._checkUpdatesEnd();
     }
@@ -581,9 +637,8 @@ class OpenSUSEUpdateIndicator extends Button {
         const count = this._updateList.filter(l => RE_ZypperLine.test(l)).length;
         UPDATES_PENDING = count;
 
-        // If flatpak check is enabled, run it now; it will call _updateStatus when done.
         if (CHECK_FLATPAK) {
-            this._checkFlatpak();
+            this._checkFlatpak(); // _updateStatus is called inside _checkFlatpakEnd
         } else {
             this._showChecking(false);
             this._updateStatus(count);
@@ -595,8 +650,8 @@ class OpenSUSEUpdateIndicator extends Button {
         if (this._flatpakProcess_sourceId) return;
 
         try {
-            const [ok, argv] = GLib.shell_parse_argv(CHECK_FLATPAK_CMD);
-            if (!ok) throw new Error('Could not parse flatpak check command');
+            // Always run through bash so the user can use pipes, &&, 2>/dev/null etc. in check-flatpak-cmd
+            const argv = ['/bin/bash', '-c', CHECK_FLATPAK_CMD];
 
             const [, pid, , out_fd] =
                 GLib.spawn_async_with_pipes(null, argv, null, GLib.SpawnFlags.DO_NOT_REAP_CHILD, null);
@@ -610,7 +665,7 @@ class OpenSUSEUpdateIndicator extends Button {
 
         } catch (err) {
             console.error(`opensuse-updates-indicator: flatpak check failed — ${err.message}`);
-            FLATPAK_PENDING = 0;
+            FLATPAK_PENDING   = 0;
             this._flatpakList = [];
             this._showChecking(false);
             this._updateStatus(UPDATES_PENDING);
@@ -620,7 +675,10 @@ class OpenSUSEUpdateIndicator extends Button {
     _checkFlatpakRead() {
         const list = [];
         let line;
-        do { [line] = this._flatpakProcess_stream.read_line_utf8(null); if (line) list.push(line); } while (line);
+        do {
+            [line] = this._flatpakProcess_stream.read_line_utf8(null);
+            if (line) list.push(line);
+        } while (line);
         this._flatpakList = list;
         this._checkFlatpakEnd();
     }
