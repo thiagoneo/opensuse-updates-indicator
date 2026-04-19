@@ -9,16 +9,17 @@ import Gtk    from 'gi://Gtk';
 import {ExtensionPreferences, gettext as _}
     from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
-// Labels for update-cmd-options (index = option number)
-const UPDATE_CMD_LABELS = [
-    /* 0 */ 'GNOME Software (GUI)',
-    /* 1 */ 'GNOME PackageKit (GUI)',
-    /* 2 */ 'Terminal: sudo zypper dup',
-    /* 3 */ 'Terminal: sudo zypper ref && sudo zypper dup',
-    /* 4 */ 'Terminal: sudo zypper dup && flatpak update',
-    /* 5 */ 'Terminal: sudo zypper ref && sudo zypper dup && flatpak update',
-    /* 6 */ 'Terminal: flatpak update  (Flatpak only)',
-    /* 7 */ 'Custom command',
+// Update method definitions: short label (shown in dropdown) +
+// full description (shown as dynamic subtitle below the combo).
+const UPDATE_METHODS = [
+    { label: 'GNOME Software',              desc: 'Opens GNOME Software in update mode (graphical, no terminal)' },
+    { label: 'GNOME PackageKit',            desc: 'Opens GNOME PackageKit update viewer (graphical, no terminal)' },
+    { label: 'zypper dup',                  desc: 'Terminal: <priv> zypper dup' },
+    { label: 'zypper ref → zypper dup',     desc: 'Terminal: <priv> zypper ref && <priv> zypper dup (refreshes repos first)' },
+    { label: 'zypper dup + Flatpak',        desc: 'Terminal: <priv> zypper dup, then Flatpak update (single auth prompt)' },
+    { label: 'zypper ref + dup + Flatpak',  desc: 'Terminal: <priv> zypper ref + dup, then Flatpak update (single auth prompt)' },
+    { label: 'Flatpak only',                desc: 'Terminal: Flatpak update only (user installs without root; system with <priv>)' },
+    { label: 'Custom command',              desc: 'Run the custom command specified below' },
 ];
 
 export default class OpenSUSEUpdatesPreferences extends ExtensionPreferences {
@@ -104,7 +105,7 @@ export default class OpenSUSEUpdatesPreferences extends ExtensionPreferences {
             _('Run a separate flatpak check after each zypper check')));
         flatpakGroup.add(_entryRow(settings, 'check-flatpak-cmd',
             _('Flatpak check command'),
-            'flatpak remote-ls --updates --columns=application 2>/dev/null'));
+            'flatpak remote-ls --updates --columns=application,version (see docs for 3-column version)'));
         flatpakGroup.add(_switchRow(settings, 'flatpak-user-only',
             _('User installs only (no root needed)'),
             _('Pass --user to flatpak update. Use this if you only have user-installed Flatpaks or want to avoid the password prompt for system ones.')));
@@ -116,18 +117,29 @@ export default class OpenSUSEUpdatesPreferences extends ExtensionPreferences {
         });
         cmdPage.add(updateGroup);
 
-        const comboRow = new Adw.ComboRow({
-            title:    _('Update method'),
-            subtitle: _('Application or command used to apply updates'),
-        });
+        const comboRow = new Adw.ComboRow({ title: _('Update method') });
         const model = new Gtk.StringList();
-        UPDATE_CMD_LABELS.forEach(l => model.append(l));
+        UPDATE_METHODS.forEach(m => model.append(m.label));
         comboRow.set_model(model);
-        comboRow.set_selected(settings.get_int('update-cmd-options'));
+
+        const updateComboSubtitle = () => {
+            const idx = comboRow.get_selected();
+            const m = UPDATE_METHODS[idx];
+            const priv = settings.get_string('priv-escalation');
+            comboRow.subtitle = m.desc.replace(/<priv>/g, priv);
+        };
+
+        const savedOpt = settings.get_int('update-cmd-options');
+        comboRow.set_selected(savedOpt);
+        updateComboSubtitle();
+
         comboRow.connect('notify::selected', () => {
             settings.set_int('update-cmd-options', comboRow.get_selected());
+            updateComboSubtitle();
             syncCustomRow();
         });
+        // Also refresh subtitle when priv escalation changes
+        settings.connect('changed::priv-escalation', updateComboSubtitle);
         updateGroup.add(comboRow);
 
         const customRow = _entryRow(settings, 'update-cmd',

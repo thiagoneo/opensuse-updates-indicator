@@ -74,9 +74,9 @@
       <description>Run a separate flatpak check and include Flatpak apps in the update count and list.</description>
     </key>
     <key type="s" name="check-flatpak-cmd">
-      <default>'flatpak remote-ls --updates --columns=application 2&gt;/dev/null'</default>
+      <default>'flatpak remote-ls --updates --columns=application,version 2>/dev/null'</default>
       <summary>Command used to list available Flatpak updates</summary>
-      <description>Must output one application ID per line.</description>
+      <description>Must output tab-separated lines: appId[TAB]newVersion, or appId[TAB]curVersion[TAB]newVersion. Runs via bash -c so pipes and redirections work.</description>
     </key>
 
     <!-- Display -->

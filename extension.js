@@ -43,6 +43,22 @@ function parseZypperLine(line) {
     return { status: p[0], repo: p[1], name: p[2], curVer: p[3], newVer: p[4], arch: p[5] ?? '' };
 }
 
+// Parses a line from the flatpak check command.
+// Supports two output formats (both tab-separated):
+//   2-column:  app.id\tnewVersion          (flatpak remote-ls --columns=application,version)
+//   3-column:  app.id\tcurVersion\tnewVersion  (custom pipeline that adds installed version)
+// Returns { appId, curVer, newVer } or null if the line is not a valid app ID.
+function parseFlatpakLine(line) {
+    const parts = line.split('\t').map(s => s.trim());
+    const appId = parts[0];
+    if (!/^[a-zA-Z][a-zA-Z0-9_-]*(\.[a-zA-Z][a-zA-Z0-9_-]*)+/.test(appId)) return null;
+    if (parts.length >= 3)
+        return { appId, curVer: parts[1], newVer: parts[2] };
+    if (parts.length === 2)
+        return { appId, curVer: '',       newVer: parts[1] };
+    return { appId, curVer: '', newVer: '' };
+}
+
 // ---------------------------------------------------------------------------
 // State that survives extension disable/enable cycles (screen lock etc.)
 // ---------------------------------------------------------------------------
@@ -62,7 +78,7 @@ let BOOT_WAIT         = 15;
 let CHECK_INTERVAL    = 3600;
 let CHECK_CMD         = '/usr/bin/zypper --quiet --no-color --no-refresh list-updates';
 let CHECK_FLATPAK     = false;
-let CHECK_FLATPAK_CMD = 'flatpak remote-ls --updates --columns=application 2>/dev/null';
+let CHECK_FLATPAK_CMD = 'flatpak remote-ls --updates --columns=application,version 2>/dev/null | while read -r _line; do _app=$(echo "$_line" | cut -f1); _new=$(echo "$_line" | cut -f2); _cur=$(flatpak info "$_app" 2>/dev/null | grep "Version:" | head -1 | sed "s/.*Version: *//"); printf "%s\\t%s\\t%s\\n" "$_app" "${_cur:-?}" "$_new"; done';
 let UPDATE_CMD_OPT    = 2;
 let UPDATE_CMD        = '';
 let TERMINAL_CMD      = 'gnome-terminal --';
@@ -267,72 +283,90 @@ class OpenSUSEUpdateIndicator extends Button {
         this._positionChanged();
     }
 
-    // ── Build the terminal update command ─────────────────────────────────────
+    // ── Terminal update launcher ──────────────────────────────────────────────
     //
-    // The fundamental rule: TERMINAL_CMD is only the "open a window" part,
-    // e.g. "gnome-terminal --" or "tilix -e" or "xterm -e".
-    // We ALWAYS inject "bash -c 'SCRIPT'" ourselves so that &&, ;, quotes,
-    // and any other shell syntax work correctly regardless of the terminal.
+    // KEY DESIGN: Gio.Subprocess with an explicit argv array bypasses all shell
+    // parsing, so the script string is passed VERBATIM to bash -c. No quoting
+    // or escaping of any kind is needed. This is the fix for the terminal
+    // closing immediately (caused by g_shell_parse_argv mishandling nested quotes).
     //
-    // The final argv passed to spawnCommandLine looks like:
-    //   gnome-terminal -- bash -c 'sudo zypper dup; ...'
-    //   tilix -e bash -c 'sudo zypper dup; ...'
+    // All root commands are grouped into ONE privileged call so the user sees
+    // exactly ONE password prompt regardless of how many commands need root.
     //
-    // ── Privilege escalation helper ──────────────────────────────────────────
-    //
-    // Returns the privilege escalation prefix to use in front of zypper/flatpak.
-    //
-    // sudo   → asks for password in the terminal
-    // pkexec → pops a graphical polkit dialog (no terminal password prompt)
-    // run0   → systemd polkit wrapper, typically graphical on desktop sessions
-    //
-    _priv() { return PRIV_ESC; }   // 'sudo' | 'pkexec' | 'run0'
+    _buildUpdateScript() {
+        const P   = PRIV_ESC;
+        const fpU = 'flatpak update --user -y';
+        const fpS = 'flatpak update --system -y';
 
-    // Build the flatpak update command that respects FLATPAK_USER_ONLY.
-    // User flatpaks never need root; system flatpaks do.
-    _flatpakCmd() {
-        if (FLATPAK_USER_ONLY) {
-            // No privilege escalation needed for --user
-            return 'flatpak update --user -y';
-        } else {
-            // Update user installs first (no root), then system installs with priv
-            return `flatpak update --user -y; ${this._priv()} flatpak update --system -y`;
+        let rootCmds = [];   // wrapped in a single priv escalation
+        let userCmds = [];   // run without root
+
+        switch (UPDATE_CMD_OPT) {
+            case 2:
+                rootCmds = ['zypper dup'];
+                break;
+            case 3:
+                rootCmds = ['zypper ref', 'zypper dup'];
+                break;
+            case 4:
+                rootCmds = FLATPAK_USER_ONLY ? ['zypper dup'] : ['zypper dup', fpS];
+                userCmds = [fpU];
+                break;
+            case 5:
+                rootCmds = FLATPAK_USER_ONLY ? ['zypper ref', 'zypper dup'] : ['zypper ref', 'zypper dup', fpS];
+                userCmds = [fpU];
+                break;
+            case 6:
+                if (!FLATPAK_USER_ONLY) rootCmds = [fpS];
+                userCmds = [fpU];
+                break;
+            default:
+                return '';
         }
-    }
 
-    _buildScript(commands) {
-        let script = commands.join(' && ');
-        if (PAUSE_BEFORE_CLOSE)
-            script += '; echo; echo "--- Pressione Enter para fechar / Press Enter to close ---"; read -r _';
+        const parts = [];
+
+        if (rootCmds.length > 0) {
+            // Single priv invocation wrapping ALL root commands.
+            // Double-quote quoting is safe: zypper/flatpak args never contain ".
+            const inner = rootCmds.join(' && ');
+            parts.push(`${P} bash -c "${inner}"`);
+        }
+
+        parts.push(...userCmds);
+
+        let script = parts.join(' && ');
+
+        if (PAUSE_BEFORE_CLOSE) {
+            // Use \n so the pause always runs even when prior commands fail
+            script += '\necho\necho "--- Pressione Enter para fechar / Press Enter to close ---"\nread -r _';
+        }
+
         return script;
     }
 
-    _inTerminal(commands) {
-        // Escape any single quotes that might appear in commands
-        const script = this._buildScript(commands).replace(/'/g, "\'");
-        // Always inject bash -c explicitly so &&, ;, pipes etc. work regardless
-        // of whether the terminal is gnome-terminal, tilix, xterm, konsole, etc.
-        return `${TERMINAL_CMD} bash -c '${script}'`;
-    }
+    _updateNow() {
+        if (UPDATE_CMD_OPT === 0) { Util.spawnCommandLine('/usr/bin/gnome-software --mode updates'); return; }
+        if (UPDATE_CMD_OPT === 1) { Util.spawnCommandLine('/usr/bin/gpk-update-viewer'); return; }
+        if (UPDATE_CMD_OPT === 7) { Util.spawnCommandLine(UPDATE_CMD || '/usr/bin/gnome-software --mode updates'); return; }
 
-    _getUpdateCommand() {
-        const P = this._priv();
-        switch (UPDATE_CMD_OPT) {
-            case 0: return '/usr/bin/gnome-software --mode updates';
-            case 1: return '/usr/bin/gpk-update-viewer';
-            case 2: return this._inTerminal([`${P} zypper dup`]);
-            case 3: return this._inTerminal([`${P} zypper ref`, `${P} zypper dup`]);
-            case 4: return this._inTerminal([`${P} zypper dup`, this._flatpakCmd()]);
-            case 5: return this._inTerminal([`${P} zypper ref`, `${P} zypper dup`, this._flatpakCmd()]);
-            case 6: return this._inTerminal([this._flatpakCmd()]);
-            case 7: return UPDATE_CMD || '/usr/bin/gnome-software --mode updates';
-            default: return '/usr/bin/gnome-software --mode updates';
+        const script = this._buildUpdateScript();
+        if (!script) return;
+
+        // Split TERMINAL_CMD by whitespace to get the argv prefix.
+        // e.g. "tilix -e" → ['tilix', '-e']
+        // Then append 'bash', '-c', script as separate elements.
+        // Gio.Subprocess does NOT invoke a shell — script reaches bash verbatim.
+        const argv = [...TERMINAL_CMD.trim().split(/\s+/), 'bash', '-c', script];
+
+        try {
+            const proc = new Gio.Subprocess({ argv, flags: Gio.SubprocessFlags.NONE });
+            proc.init(null);
+        } catch (err) {
+            console.error(`opensuse-updates-indicator: could not launch terminal — ${err.message}`);
         }
     }
 
-    _updateNow() {
-        Util.spawnCommandLine(this._getUpdateCommand());
-    }
 
     // ── Periodic check scheduling ─────────────────────────────────────────────
     _scheduleCheck() {
@@ -548,13 +582,21 @@ class OpenSUSEUpdateIndicator extends Button {
 
         if (enabled && this._flatpakList.length > 0) {
             this.flatpakExpanderContainer.destroy_all_children();
-            this._flatpakList.forEach(appId => {
-                if (!appId.trim()) return;
+            this._flatpakList.forEach(line => {
+                const info = parseFlatpakLine(line);
+                if (!info) return;
+
                 const row = new St.BoxLayout({ vertical: false, style_class: 'opensuse-update-line' });
                 row.add_child(new St.Label({ text: '📦 ', style_class: 'opensuse-update-flatpak-icon' }));
                 row.add_child(new St.Label({
-                    text: appId.trim(), x_expand: true, style_class: 'opensuse-update-name',
+                    text: info.appId, x_expand: true, style_class: 'opensuse-update-name',
                 }));
+                if (info.curVer && info.newVer) {
+                    row.add_child(new St.Label({ text: info.curVer + ' → ', style_class: 'opensuse-update-ver-from' }));
+                    row.add_child(new St.Label({ text: info.newVer, style_class: 'opensuse-update-ver-to' }));
+                } else if (info.newVer) {
+                    row.add_child(new St.Label({ text: '→ ' + info.newVer, style_class: 'opensuse-update-ver-to' }));
+                }
                 this.flatpakExpanderContainer.add_child(row);
             });
         }
@@ -694,7 +736,7 @@ class OpenSUSEUpdateIndicator extends Button {
         }
         this._flatpakProcess_pid = null;
 
-        FLATPAK_PENDING = this._flatpakList.filter(l => RE_FlatpakLine.test(l)).length;
+        FLATPAK_PENDING = this._flatpakList.filter(l => parseFlatpakLine(l) !== null).length;
         FLATPAK_LIST    = this._flatpakList;
 
         this._showChecking(false);
